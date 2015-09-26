@@ -5,25 +5,31 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.os.Handler;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
-import android.text.format.Time;
+import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
-import android.view.ViewGroup;
+import android.widget.RelativeLayout;
 
-import com.jjoe64.graphview.GraphView;
-import com.jjoe64.graphview.series.DataPoint;
-import com.jjoe64.graphview.series.LineGraphSeries;
+import com.pubnub.api.Callback;
+import com.pubnub.api.Pubnub;
+import com.pubnub.api.PubnubError;
+import com.pubnub.api.PubnubException;
+
+import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
+
+import java.util.ArrayList;
 
 public class MainActivity extends AppCompatActivity implements SensorEventListener {
 
-    private GraphView mGraphView;
-    private LineGraphSeries<DataPoint> xSeries;
-    private LineGraphSeries<DataPoint> ySeries;
-    private LineGraphSeries<DataPoint> zSeries;
+    private Pubnub pubnub;
+    final String pubKey = "pub-c-51f1e02f-37f7-40cc-a7c4-055479877b40";
+    final String subKey = "sub-c-af5f4710-640d-11e5-bad4-02ee2ddab7fe";
+    final String channel = "a";
 
-    private long referenceTime;
+    private RelativeLayout mLayout;
 
     private SensorManager mManager;
     private Sensor mAccelerometer;
@@ -33,32 +39,12 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        mGraphView = new GraphView(this);
-        addContentView(mGraphView, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.FILL_PARENT,
-                ViewGroup.LayoutParams.FILL_PARENT));
-        mGraphView.getViewport().setXAxisBoundsManual(true);
-        mGraphView.getViewport().setMinX(0);
-        mGraphView.getViewport().setMaxX(500);
-
-        xSeries = new LineGraphSeries<>();
-        xSeries.setTitle("X");
-        xSeries.setColor(Color.RED);
-        ySeries = new LineGraphSeries<>();
-        ySeries.setTitle("Y");
-        ySeries.setColor(Color.GREEN);
-        zSeries = new LineGraphSeries<>();
-        zSeries.setTitle("Z");
-        zSeries.setColor(Color.BLUE);
-        mGraphView.addSeries(xSeries);
-        mGraphView.addSeries(ySeries);
-        mGraphView.addSeries(zSeries);
+        mLayout = (RelativeLayout) findViewById(R.id.main_activity_layout);
 
         mManager = (SensorManager) getSystemService(SENSOR_SERVICE);
         mAccelerometer = mManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
 
-        Time time = new Time();
-        time.setToNow();
-        referenceTime = time.toMillis(true);
+        pubnub = new Pubnub(pubKey, subKey);
     }
 
     @Override
@@ -95,14 +81,92 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         mManager.unregisterListener(this, mAccelerometer);
     }
 
+    final int DATASET_SIZE = 20;
+    boolean b = false;
+
+    ArrayList<Double> xValues = new ArrayList<>();
+    ArrayList<Double> yValues = new ArrayList<>();
+    ArrayList<Double> zValues = new ArrayList<>();
+
+    boolean canSend = true;
+
     @Override
-    public void onSensorChanged(SensorEvent event) {
-        Time time = new Time();
-        time.setToNow();
-        long currentTime = (time.toMillis(true) - referenceTime) / 100;
-        xSeries.appendData(new DataPoint(currentTime, event.values[0] * 100), true, 200);
-        ySeries.appendData(new DataPoint(currentTime, event.values[1] * 100), true, 200);
-        zSeries.appendData(new DataPoint(currentTime, event.values[2] * 100), true, 200);
+    public void onSensorChanged(final SensorEvent event) {
+        double xAccel = event.values[0];
+        double yAccel = event.values[1];
+        double zAccel = event.values[2];
+
+        xValues.add(xAccel);
+        yValues.add(yAccel);
+        zValues.add(zAccel);
+
+        if (xValues.size() > DATASET_SIZE) {
+            xValues.remove(0);
+            yValues.remove(0);
+            zValues.remove(0);
+
+            if (!canSend) {
+                return;
+            }
+
+            if (areOutliers(xValues) || areOutliers(yValues) || areOutliers(zValues)) {
+                Callback callback = new Callback() {
+                    public void successCallback(String channel, Object response) {
+                        System.out.println(response.toString());
+                        canSend = false;
+                        new Handler().postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                canSend = true;
+                            }
+                        }, 1000 * 30);
+                    }
+                    public void errorCallback(String channel, PubnubError error) {
+                        System.out.println(error.toString());
+                    }
+                };
+                if (b) {
+                    mLayout.setBackgroundColor(Color.BLACK);
+                } else {
+                    mLayout.setBackgroundColor(Color.WHITE);
+                }
+                pubnub.publish(channel, "Changed state!", callback);
+                b = !b;
+                xValues.clear();
+                yValues.clear();
+                zValues.clear();
+            }
+        }
+    }
+
+    private boolean areOutliers(ArrayList<Double> arrayList) {
+        double[] doubleArray = convertToArray(arrayList);
+
+        DescriptiveStatistics statistics = new DescriptiveStatistics(doubleArray);
+        double median = statistics.getPercentile(50);
+
+        double[] distFromMedianArray = convertToArray(arrayList);
+        for (int idx = 0; idx < DATASET_SIZE; idx++) {
+            distFromMedianArray[idx] = Math.abs(doubleArray[idx] - median);
+        }
+
+        statistics = new DescriptiveStatistics(distFromMedianArray);
+        final double CONSISTENCY_CONSTANT = 1.4826;
+        double medianAbsoluteDeviation = statistics.getPercentile(50) * CONSISTENCY_CONSTANT;
+
+        for (int idx = 0; idx < DATASET_SIZE; idx++) {
+            distFromMedianArray[idx] /= medianAbsoluteDeviation;
+        }
+        statistics = new DescriptiveStatistics(distFromMedianArray);
+        return statistics.getMax() > 10;
+    }
+
+    private double[] convertToArray(ArrayList<Double> arrayList) {
+        double[] doubleArray = new double[DATASET_SIZE];
+        for (int idx = 0; idx < DATASET_SIZE; idx++) {
+            doubleArray[idx] = arrayList.get(idx);
+        }
+        return doubleArray;
     }
 
     @Override
